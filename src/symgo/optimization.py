@@ -13,6 +13,16 @@ from symfc.basis_sets import FCBasisSetO1
 from symfc.utils.utils import SymfcAtoms
 
 
+def print_structure(structure: SymfcAtoms):
+    """Print structure."""
+    print("basis vectors:")
+    for a in structure.cell:
+        print(f" - {a}")
+    print("Fractional coordinates:")
+    for p, e in zip(structure.scaled_positions, structure.numbers):
+        print(f" - {e} {p}")
+
+
 def _refine_positions(cell: SymfcAtoms, tol=1e-13):
     """Refine atomic positions to be within [0, 1)."""
     positions = cell.scaled_positions
@@ -164,33 +174,39 @@ class Property(ABC):
 
     def __init__(self):
         """Init method."""
-        self._cell: SymfcAtoms
+        self._energy: float
+        self._force: NDArray
+        self._stress: NDArray
 
     @abstractmethod
     def eval(self, cell: SymfcAtoms):
         """Evaluate property."""
-        self._cell = cell
+        pass
 
     @property
-    @abstractmethod
     def energy(self) -> float:
         """Return energy in a specific energy unit."""
-        return 0.0
+        return self._energy
 
     @property
-    @abstractmethod
     def force(self) -> NDArray:
-        """Return forces in a specific energy unit."""
-        return np.zeros((3, len(self._cell)))
+        """Return forces in a specific energy unit.
+
+        shape=(3, len(cell))
+
+        """
+        return self._force
 
     @property
-    @abstractmethod
     def stress(self) -> NDArray:
-        """Return stresses in a specific energy unit."""
-        return np.zeros((6,))
+        """Return stress in a specific energy unit.
+
+        shape=(6,)
+
+        """
+        return self._stress
 
     @property
-    @abstractmethod
     def GPa_to_energy(self) -> float:
         """Return conversion factor from GPa to energy unit."""
         EVtoGPa = 160.21766208
@@ -303,7 +319,7 @@ class GeometryOptimization:
 
     @property
     def residual_forces(self):
-        """Return residual forces and stresses represented in basis sets."""
+        """Return residual forces and stress represented in basis sets."""
         if self._relax_cell or self._relax_volume:
             residual_f = -self._res.jac[: self._size_pos]  # type: ignore
             residual_s = -self._res.jac[self._size_pos :]  # type: ignore
@@ -353,7 +369,6 @@ class GeometryOptimization:
 
         self._x0 = np.concatenate([xf, xs], 0)
         self._size_pos = 0 if self._basis_frac is None else self._basis_frac.shape[1]
-        return self._x0
 
     def _split(self, x: NDArray):
         """Split coefficients."""
@@ -362,126 +377,134 @@ class GeometryOptimization:
         x_axis = x[partition1:]
         return x_pos, x_axis
 
-    def function_fix_cell(self, x: NDArray | None, args: None = None):
+    def function_fix_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
         """Target function when performing no cell optimization.
 
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        self._to_structure_fix_cell(x)
-        self._prop.eval(self._structure)
-        self._energy = self._prop.energy
-        self._force = self._prop.force
+        structure = self._to_structure_fix_cell(x, self._structure)
+        self._prop.eval(structure)
+        energy = self._prop.energy
 
-        if self._energy < -1e3 * self._n_atom:
-            print("Energy =", self._energy)
+        if energy < -1e3 * self._n_atom:
+            print("Energy =", energy)
             print("Axis :")
-            print(self._structure.cell)
+            print(structure.cell)
             print("Fractional coordinates:")
-            print(self._structure.scaled_positions)
+            print(structure.scaled_positions)
             raise ValueError(
                 "Geometry optimization failed: Huge negative energy value."
             )
 
-        self._energy += self._pressure * np.linalg.det(self._structure.cell)
-        return self._energy
+        energy += self._pressure * np.linalg.det(structure.cell)
+        return energy
 
-    def jacobian_fix_cell(self, x: NDArray | None, args: None = None):
+    def jacobian_fix_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
         """Target Jacobian function when performing no cell optimization.
 
         x and args are a dummy variable for scipy.optimize.minimize.
 
         """
         if self._basis_frac is not None:
-            prod = -(self._structure.cell @ self._force).T
+            structure = self._to_structure_fix_cell(x, self._structure)
+            prod = -(structure.cell @ self._prop.force).T
             derivatives = self._basis_frac.T @ prod.ravel()
             return derivatives
         return []
 
-    def function_relax_cell(self, x: NDArray | None, args: None = None):
+    def function_relax_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
         """Target function when performing cell optimization.
 
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        assert x is not None
-        self._to_structure_relax_cell(x)
-        self._prop.eval(self._structure)
-        self._energy = self._prop.energy
-        self._force = self._prop.force
-        self._stress = self._prop.stress
+        structure = self._to_structure_relax_cell(x)
+        self._prop.eval(structure)
+        energy = self._prop.energy
 
         if (
-            self._energy < -1e3 * self._n_atom
-            or abs(np.linalg.det(self._structure.cell)) / self._n_atom > 1000
+            energy < -1e3 * self._n_atom
+            or abs(np.linalg.det(structure.cell)) / self._n_atom > 1000
         ):
-            print("Energy =", self._energy)
+            print("Energy =", energy)
             print("Lattice vectors:")
-            print(self._structure.cell)
+            print(structure.cell)
             print("Fractional coordinates:")
-            print(self._structure.scaled_positions)
+            print(structure.scaled_positions)
             raise ValueError(
                 "Geometry optimization failed: Huge negative energy value"
                 "or huge volume value."
             )
 
-        self._energy += self._pressure * np.linalg.det(self._structure.cell)
-        return self._energy
+        energy += self._pressure * np.linalg.det(structure.cell)
+        return energy
 
-    def jacobian_relax_cell(self, x: NDArray | None, args: None = None):
+    def jacobian_relax_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
         """Target Jacobian function when performing cell optimization.
 
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        assert x is not None
         partition1 = self._size_pos
         derivatives = np.zeros(len(x))
         if self._relax_positions:
-            derivatives[:partition1] = self.jacobian_fix_cell(None)
-        derivatives[partition1:] = self.derivatives_by_axis()
+            derivatives[:partition1] = self.jacobian_fix_cell(x[:partition1])
+        structure = self._to_structure_relax_cell(x)
+        derivatives[partition1:] = self._derivatives_by_axis(
+            structure, self._prop.stress
+        )
         return derivatives
 
-    def _update_positions(self, positions_frac: NDArray):
+    def _update_positions(
+        self, positions_frac: NDArray, structure: SymfcAtoms
+    ) -> SymfcAtoms:
         """Update atomic positions."""
-        self._structure = _refine_positions(
+        return _refine_positions(
             SymfcAtoms(
-                cell=self._structure.cell,
-                numbers=self._structure.numbers,
+                cell=structure.cell,
+                numbers=structure.numbers,
                 scaled_positions=positions_frac,
             )
         )
 
-    def _to_structure_fix_cell(self, x: NDArray):
+    def _to_structure_fix_cell(self, x: NDArray, structure: SymfcAtoms) -> SymfcAtoms:
         """Convert x to structure."""
         if self._basis_frac is not None:
             disps_f = (self._basis_frac @ x).reshape(-1, 3)
-            self._update_positions(self._positions_f0 + disps_f)
+            return self._update_positions(self._positions_f0 + disps_f, structure)
+        return structure
 
-    def _to_structure_relax_cell(self, x: NDArray):
+    def _to_structure_relax_cell(self, x: NDArray) -> SymfcAtoms:
         """Convert x to structure."""
         x_positions, x_cells = self._split(x)
         if self._relax_cell:
             axis = self._basis_axis @ x_cells
-            axis = axis.reshape((3, 3))
+            cell = axis.reshape((3, 3)).T
         else:
-            scale = (x_cells[0] / np.linalg.det(self._structure.cell)) ** (1 / 3)
+            x_cells0 = self._split(self._x0)[1][0]
+            scale = (x_cells[0] / x_cells0) ** (1 / 3)
             cell = self._structure.cell * scale
-        self._structure = SymfcAtoms(
+
+        structure = SymfcAtoms(
             cell=cell,
             numbers=self._structure.numbers,
             scaled_positions=self._structure.scaled_positions,
         )
 
         if self._relax_positions:
-            self._to_structure_fix_cell(x_positions)
+            return self._to_structure_fix_cell(x_positions, structure)
+
+        return structure
 
     def _to_volume(self, x: NDArray) -> float:
         _, x_cells = self._split(x)
         axis = self._basis_axis @ x_cells
         return np.linalg.det(axis.reshape((3, 3)))
 
-    def derivatives_by_axis(self):
+    def _derivatives_by_axis(
+        self, structure: SymfcAtoms, stress: NDArray
+    ) -> NDArray | float:
         """Compute derivatives with respect to axis elements.
 
         PV @ axis_inv.T is exactly the same as the derivatives of PV term
@@ -491,17 +514,17 @@ class GeometryOptimization:
         serves as an approximation to the derivative of the enthalpy
         with respect to volume.
         """
-        pv = self._pressure * np.linalg.det(self._structure.cell)
+        pv = self._pressure * np.linalg.det(structure.cell)
         sigma = [
-            [self._stress[0] - pv, self._stress[3], self._stress[5]],
-            [self._stress[3], self._stress[1] - pv, self._stress[4]],
-            [self._stress[5], self._stress[4], self._stress[2] - pv],
+            [stress[0] - pv, stress[3], stress[5]],
+            [stress[3], stress[1] - pv, stress[4]],
+            [stress[5], stress[4], stress[2] - pv],
         ]
         if self._relax_cell:
             """derivatives_s: In the order of ax, bx, cx, ay, by, cy, az, bz, cz"""
-            derivatives_s = -np.array(sigma) @ np.linalg.inv(self._structure.cell)
+            derivatives_s = -np.array(sigma) @ np.linalg.inv(structure.cell)
             assert self._basis_axis is not None
-            derivatives_s = self._basis_axis.T @ derivatives_s.reshape(-1)
+            derivatives_s = self._basis_axis.T @ derivatives_s.ravel()
         else:
             derivatives_s = -np.trace(np.array(sigma)) / 3
 
@@ -536,18 +559,15 @@ class GeometryOptimization:
             print("Relax atomic positionss:", self._relax_positions, flush=True)
 
         if method == "SLSQP":
-            options = {"ftol": gtol, "disp": True}
+            options = {"ftol": gtol, "disp": self._verbose}
         else:
-            options = {"gtol": gtol, "disp": True}
+            options = {"gtol": gtol, "disp": self._verbose}
             if maxiter is not None:
                 options["maxiter"] = maxiter
             if c1 is not None:
                 options["c1"] = c1
             if c2 is not None:
                 options["c2"] = c2
-        options["disp"] = self._verbose
-
-        print(options)
 
         if self._relax_cell or self._relax_volume:
             fun = self.function_relax_cell
@@ -576,15 +596,7 @@ class GeometryOptimization:
             )
         else:
             self._res = minimize(fun, self._x0, method=method, jac=jac, options=options)
+
         self._x0 = self._res.x
 
         return self
-
-    def _print_structure(self):
-        """Print structure."""
-        print("basis vectors:")
-        for a in self._structure.cell:
-            print(f" - {list(a)}")
-        print("Fractional coordinates:")
-        for p, e in zip(self._structure.scaled_positions, self._structure.numbers):
-            print(f" - {e} {list(p)}", flush=True)
