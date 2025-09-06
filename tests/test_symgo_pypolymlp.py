@@ -9,12 +9,12 @@ from pypolymlp.mlp_dev.pypolymlp import Pypolymlp
 from pypolymlp.utils.phonopy_utils import phonopy_cell_to_structure
 from symfc.utils.utils import SymfcAtoms
 
-from symgo.optimization import GeometryOptimization, Property, print_structure
+from symgo.optimization import GeometryOptimization, PropertyCalculator, print_structure
 
 cwd = pathlib.Path(__file__).parent
 
 
-class PypolymlpProperty(Property):
+class PypolymlpPropertyCalculator(PropertyCalculator):
     """Property class using pypolymlp."""
 
     def __init__(
@@ -62,6 +62,6 @@ def test_symgo_relax_positions():
         numbers=scell.numbers,
         scaled_positions=scell.scaled_positions,
     )
-    prop = PypolymlpProperty(cwd / "polymlp.yaml", verbose=True)
+    prop = PypolymlpPropertyCalculator(cwd / "polymlp.yaml", verbose=True)
     go = GeometryOptimization(cell, prop, verbose=True)
     go.run()

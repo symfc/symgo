@@ -169,8 +169,8 @@ def _get_symmetry_dataset(cell: SymfcAtoms) -> spglib.SpglibDataset | None:  # t
     return spg_info
 
 
-class Property(ABC):
-    """Class for properties needed in geometry optimization."""
+class PropertyCalculator(ABC):
+    """Calculator class to compute properties."""
 
     def __init__(self):
         """Init method."""
@@ -219,7 +219,7 @@ class GeometryOptimization:
     def __init__(
         self,
         cell: SymfcAtoms,
-        prop: Property,
+        prop: PropertyCalculator,
         relax_cell: bool = False,
         relax_volume: bool = False,
         relax_positions: bool = True,
@@ -383,7 +383,7 @@ class GeometryOptimization:
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        structure = self._to_structure_fix_cell(x, self._structure)
+        structure = self._to_structure_fix_cell(x)
         self._prop.eval(structure)
         energy = self._prop.energy
 
@@ -407,7 +407,7 @@ class GeometryOptimization:
 
         """
         if self._basis_frac is not None:
-            structure = self._to_structure_fix_cell(x, self._structure)
+            structure = self._to_structure_fix_cell(x)
             prod = -(structure.cell @ self._prop.force).T
             derivatives = self._basis_frac.T @ prod.ravel()
             return derivatives
@@ -468,12 +468,12 @@ class GeometryOptimization:
             )
         )
 
-    def _to_structure_fix_cell(self, x: NDArray, structure: SymfcAtoms) -> SymfcAtoms:
+    def _to_structure_fix_cell(self, x: NDArray) -> SymfcAtoms:
         """Convert x to structure."""
         if self._basis_frac is not None:
             disps_f = (self._basis_frac @ x).reshape(-1, 3)
-            return self._update_positions(self._positions_f0 + disps_f, structure)
-        return structure
+            return self._update_positions(self._positions_f0 + disps_f, self._structure)
+        return self._structure
 
     def _to_structure_relax_cell(self, x: NDArray) -> SymfcAtoms:
         """Convert x to structure."""
@@ -493,7 +493,7 @@ class GeometryOptimization:
         )
 
         if self._relax_positions:
-            return self._to_structure_fix_cell(x_positions, structure)
+            return self._to_structure_fix_cell(x_positions)
 
         return structure
 
@@ -598,5 +598,10 @@ class GeometryOptimization:
             self._res = minimize(fun, self._x0, method=method, jac=jac, options=options)
 
         self._x0 = self._res.x
+
+        if self._relax_cell or self._relax_volume:
+            self._structure = self._to_structure_relax_cell(self._res.x)
+        else:
+            self._structure = self._to_structure_fix_cell(self._res.x)
 
         return self
