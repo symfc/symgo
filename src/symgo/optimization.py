@@ -597,11 +597,11 @@ class GeometryOptimization:
         else:
             self._res = minimize(fun, self._x0, method=method, jac=jac, options=options)
 
-        self._x0 = self._res.x
-
         if self._relax_cell or self._relax_volume:
             self._structure = self._to_structure_relax_cell(self._res.x)
         else:
             self._structure = self._to_structure_fix_cell(self._res.x)
+
+        self._x0 = self._res.x
 
         return self
