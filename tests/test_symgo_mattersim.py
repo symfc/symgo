@@ -7,12 +7,12 @@ from mattersim.forcefield import MatterSimCalculator
 from numpy.typing import NDArray
 from symfc.utils.utils import SymfcAtoms
 
-from symgo.optimization import GeometryOptimization, Property, print_structure
+from symgo.optimization import GeometryOptimization, PropertyCalculator, print_structure
 
 cwd = pathlib.Path(__file__).parent
 
 
-class MattersimProperty(Property):
+class MattersimPropertyCalculator(PropertyCalculator):
     """Property class using pypolymlp."""
 
     def __init__(self, cell: SymfcAtoms, verbose: bool = False):
@@ -84,9 +84,13 @@ def test_symgo_relax_positions():
         numbers=scell.numbers,
         scaled_positions=scell.scaled_positions,
     )
-    prop = MattersimProperty(cell, verbose=True)
+    prop = MattersimPropertyCalculator(cell)
     go = GeometryOptimization(cell, prop, verbose=True)
-    go.run()
+    go.run(gtol=1e-4)
+    print(go.structure.scaled_positions[0])
+    np.testing.assert_allclose(
+        go.structure.scaled_positions[0], [0.99858583, 0.0, 0.0], atol=0.001
+    )
 
 
 def test_symgo_relax_cell():
@@ -105,8 +109,9 @@ def test_symgo_relax_cell():
             [0.0000000000000000, 0.0000000000000000, 0.5000000000000000],
         ],
     )
-    prop = MattersimProperty(cell, verbose=True)
+    prop = MattersimPropertyCalculator(cell)
     go = GeometryOptimization(
         cell, prop, relax_cell=True, relax_volume=True, verbose=True
     )
-    go.run(gtol=1e-10)
+    go.run(gtol=1e-5)
+    np.testing.assert_allclose(go.structure.cell, np.eye(3) * 5.70141633)
