@@ -23,40 +23,43 @@ def print_structure(structure: SymfcAtoms):
         print(f" - {e} {p}")
 
 
-def _refine_positions(cell: SymfcAtoms, tol=1e-13):
+def _refine_positions(positions: NDArray, tol=1e-13):
     """Refine atomic positions to be within [0, 1)."""
-    positions = cell.scaled_positions
     positions -= np.floor(positions)
     positions[np.where(positions > 1 - tol)] -= 1.0
-    return SymfcAtoms(cell=cell.cell, numbers=cell.numbers, scaled_positions=positions)
+    return positions
+
+
+def _update_positions(structure: SymfcAtoms) -> SymfcAtoms:
+    """Update atomic positions."""
+    return SymfcAtoms(
+        cell=structure.cell,
+        numbers=structure.numbers,
+        scaled_positions=_refine_positions(structure.scaled_positions),
+    )
 
 
 def _construct_basis_fractional_coordinates(cell: SymfcAtoms) -> NDArray | None:
     """Generate a basis set for atomic positions in fractional coordinates."""
-    basis_cart = _construct_basis_cartesian(cell)
+    try:
+        fc_basis = FCBasisSetO1(cell).run()
+    except ValueError:
+        return None
+    assert fc_basis.full_basis_set is not None
+    basis_cart = fc_basis.full_basis_set.toarray()
     if basis_cart is None or basis_cart.size == 0:
         return None
     basis_f = _basis_cartesian_to_fractional_coordinates(basis_cart, cell)
     return basis_f
 
 
-def _construct_basis_cartesian(cell: SymfcAtoms) -> NDArray | None:
-    """Generate a basis set for atomic positions in Cartesian coordinates."""
-    try:
-        fc_basis = FCBasisSetO1(cell).run()
-    except ValueError:
-        return None
-    assert fc_basis.full_basis_set is not None
-    return fc_basis.full_basis_set.toarray()
-
-
 def _basis_cartesian_to_fractional_coordinates(
-    basis_cart: NDArray, unitcell: SymfcAtoms
+    basis_cart: NDArray, cell: SymfcAtoms
 ) -> NDArray:
     """Convert basis set in Cartesian coord. to basis set in fractional coordinates."""
     n_basis = basis_cart.shape[1]
-    n_atom = len(unitcell)
-    inv_lattice = np.linalg.inv(unitcell.cell)
+    n_atom = len(cell)
+    inv_lattice = np.linalg.inv(cell.cell)
 
     basis_cart = np.array([b.reshape((n_atom, 3)) for b in basis_cart.T])
     basis_cart = basis_cart.transpose((2, 1, 0))
@@ -70,58 +73,41 @@ def _basis_cartesian_to_fractional_coordinates(
 
 def _construct_basis_cell(
     cell: SymfcAtoms, verbose: bool = False
-) -> tuple[NDArray, SymfcAtoms]:
+) -> tuple[NDArray, NDArray]:
     """Generate a basis set for basis vectors.
 
     basis (row): In the order of ax, bx, cx, ay, by, cy, az, bz, cz
 
     """
-    cell_copy = _standardize_cell(cell)
-    spg_info = _get_symmetry_dataset(cell_copy)
+    spg_info = spglib.get_symmetry_dataset(cell.totuple())  # type: ignore
     assert spg_info is not None
-    spg_num = spg_info.number
-    if verbose:
-        if len(cell_copy.numbers) != len(cell.numbers):
-            print("Number of atoms changed by standardization.")
-        print("Space group:", spg_info.international, spg_num)
-    if spg_num >= 195:
+    ptg_symbol, ptg_number, tmat = spglib.get_pointgroup(spg_info.rotations)  # type: ignore
+    print(f"Point group of input lattice: {ptg_symbol}")
+    if ptg_number >= 28:
         if verbose:
             print("Crystal system: Cubic")
         basis = np.zeros((9, 1))
         basis[:, 0] = _normalize_vector([1, 0, 0, 0, 1, 0, 0, 0, 1])
-    elif spg_num >= 168 and spg_num <= 194:
+    elif 16 <= ptg_number <= 27:
         if verbose:
             print("Crystal system: Hexagonal")
         basis = np.zeros((9, 2))
         basis[:, 0] = _normalize_vector([1, -0.5, 0, 0, np.sqrt(3) / 2, 0, 0, 0, 0])
         basis[8, 1] = 1.0
-    elif spg_num >= 143 and spg_num <= 167:
-        if "P" in spg_info["international"]:
-            if verbose:
-                print("Crystal system: Trigonal (Hexagonal)")
-            basis = np.zeros((9, 2))
-            basis[:, 0] = _normalize_vector([1, -0.5, 0, 0, np.sqrt(3) / 2, 0, 0, 0, 0])
-            basis[8, 1] = 1.0
-        else:
-            if verbose:
-                print("Crystal system: Trigonal (Rhombohedral)")
-            basis = np.zeros((9, 2))
-            basis[:, 0] = _normalize_vector([1, -0.5, 0, 0, np.sqrt(3) / 2, 0, 0, 0, 0])
-            basis[8, 1] = 1.0
-    elif spg_num >= 75 and spg_num <= 142:
+    elif 9 <= ptg_number <= 15:
         if verbose:
             print("Crystal system: Tetragonal")
         basis = np.zeros((9, 2))
         basis[:, 0] = _normalize_vector([1, 0, 0, 0, 1, 0, 0, 0, 0])
         basis[8, 1] = 1.0
-    elif spg_num >= 16 and spg_num <= 74:
+    elif 6 <= ptg_number <= 8:
         if verbose:
             print("Crystal system: Orthorhombic")
         basis = np.zeros((9, 3))
         basis[0, 0] = 1.0
         basis[4, 1] = 1.0
         basis[8, 2] = 1.0
-    elif spg_num >= 3 and spg_num <= 15:
+    elif 3 <= ptg_number <= 5:
         if verbose:
             print("Crystal system: Monoclinic")
         basis = np.zeros((9, 4))
@@ -133,40 +119,13 @@ def _construct_basis_cell(
         if verbose:
             print("Crystal system: Triclinic")
         basis = np.eye(9)
-    return basis, cell_copy
+    return basis, np.array(tmat)
 
 
 def _normalize_vector(vec: ArrayLike) -> NDArray:
     """Normalize a vector."""
     _vec = np.array(vec)
     return _vec / np.linalg.norm(_vec)
-
-
-def _standardize_cell(cell: SymfcAtoms) -> SymfcAtoms:
-    """Standardize cell for constructing cell basis."""
-    lattice, scaled_positions, numbers = spglib.standardize_cell(  # type: ignore
-        cell.totuple(),  # type: ignore
-        to_primitive=False,
-    )
-
-    n_atoms, scaled_positions_reorder, numbers_reorder = [], [], []
-    for i in sorted(set(numbers)):
-        ids = np.where(numbers == i)[0]
-        n_atoms.append(len(ids))
-        scaled_positions_reorder += scaled_positions[ids].tolist()  # type: ignore
-        numbers_reorder += numbers[ids].tolist()  # type: ignore
-
-    cell_standardized = SymfcAtoms(
-        numbers=numbers_reorder, cell=lattice, scaled_positions=scaled_positions_reorder
-    )
-    return cell_standardized
-
-
-def _get_symmetry_dataset(cell: SymfcAtoms) -> spglib.SpglibDataset | None:  # type: ignore
-    """Return symmetry dataset."""
-    spg_info = spglib.get_symmetry_dataset(cell.totuple())  # type: ignore
-    assert spg_info is not None
-    return spg_info
 
 
 class PropertyCalculator(ABC):
@@ -254,10 +213,12 @@ class GeometryOptimization:
 
         self._structure: SymfcAtoms
         self._basis_axis: NDArray | None
-        self._positions_f0: NDArray
+        self._transformation_matrix: NDArray
         self._set_basis_axis(cell)
+        self._positions_f0 = self._structure.scaled_positions
+
         self._basis_frac: NDArray | None
-        self._set_basis_positions(cell)
+        self._set_basis_positions()
 
         if not self._relax_cell and not self._relax_volume:
             if not self._relax_positions:
@@ -294,11 +255,12 @@ class GeometryOptimization:
     @property
     def structure(self):
         """Return optimized structure."""
-        return self._structure
-
-    @structure.setter
-    def structure(self, st: SymfcAtoms):
-        self._structure = _refine_positions(st)
+        lattice = np.linalg.inv(self._transformation_matrix).T @ self._structure.cell
+        return SymfcAtoms(
+            cell=lattice,
+            numbers=self._structure.numbers,
+            scaled_positions=self._structure.scaled_positions,
+        )
 
     @property
     def energy(self):
@@ -328,30 +290,35 @@ class GeometryOptimization:
 
     def _set_basis_axis(self, cell: SymfcAtoms):
         """Set basis vectors for axis components."""
+        self._transformation_matrix = np.eye(3)
         if self._relax_cell:
             if self._with_sym:
-                self._basis_axis, cell_update = _construct_basis_cell(
+                self._basis_axis, self._transformation_matrix = _construct_basis_cell(
                     cell,
                     verbose=self._verbose,
                 )
             else:
                 self._basis_axis = np.eye(9)
-                cell_update = cell
         else:
             self._basis_axis = None
-            cell_update = cell
-        self._structure = _refine_positions(cell_update)
-        self._positions_f0 = self._structure.scaled_positions
 
-    def _set_basis_positions(self, cell: SymfcAtoms):
+        self._structure = SymfcAtoms(
+            cell=self._transformation_matrix.T @ cell.cell,
+            numbers=cell.numbers,
+            scaled_positions=_refine_positions(cell.scaled_positions),
+        )
+
+    def _set_basis_positions(self):
         """Set basis vectors for atomic positions."""
         if self._relax_positions:
             if self._with_sym:
-                self._basis_frac = _construct_basis_fractional_coordinates(cell)
+                self._basis_frac = _construct_basis_fractional_coordinates(
+                    self._structure
+                )
                 if self._basis_frac is None:
                     self._relax_positions = False
             else:
-                N3 = cell.scaled_positions.shape[0] * cell.scaled_positions.shape[1]
+                N3 = int(np.prod(self._structure.scaled_positions.shape))
                 self._basis_frac = np.eye(N3)
         else:
             self._basis_frac = None
@@ -383,7 +350,7 @@ class GeometryOptimization:
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        structure = self._to_structure_fix_cell(x)
+        structure = self._to_structure(x)
         self._prop.eval(structure)
         energy = self._prop.energy
 
@@ -407,7 +374,7 @@ class GeometryOptimization:
 
         """
         if self._basis_frac is not None:
-            structure = self._to_structure_fix_cell(x)
+            structure = self._to_structure(x)
             prod = -(structure.cell @ self._prop.force).T
             derivatives = self._basis_frac.T @ prod.ravel()
             return derivatives
@@ -419,7 +386,7 @@ class GeometryOptimization:
         args is a dummy variable for scipy.optimize.minimize.
 
         """
-        structure = self._to_structure_relax_cell(x)
+        structure = self._to_structure(x)
         self._prop.eval(structure)
         energy = self._prop.energy
 
@@ -449,53 +416,38 @@ class GeometryOptimization:
         partition1 = self._size_pos
         derivatives = np.zeros(len(x))
         if self._relax_positions:
-            derivatives[:partition1] = self.jacobian_fix_cell(x[:partition1])
-        structure = self._to_structure_relax_cell(x)
+            derivatives[:partition1] = self.jacobian_fix_cell(x)
+        structure = self._to_structure(x)
         derivatives[partition1:] = self._derivatives_by_axis(
             structure, self._prop.stress
         )
         return derivatives
 
-    def _update_positions(
-        self, positions_frac: NDArray, structure: SymfcAtoms
-    ) -> SymfcAtoms:
-        """Update atomic positions."""
-        return _refine_positions(
-            SymfcAtoms(
-                cell=structure.cell,
-                numbers=structure.numbers,
-                scaled_positions=positions_frac,
-            )
-        )
-
-    def _to_structure_fix_cell(self, x: NDArray) -> SymfcAtoms:
-        """Convert x to structure."""
-        if self._basis_frac is not None:
-            disps_f = (self._basis_frac @ x).reshape(-1, 3)
-            return self._update_positions(self._positions_f0 + disps_f, self._structure)
-        return self._structure
-
-    def _to_structure_relax_cell(self, x: NDArray) -> SymfcAtoms:
+    def _to_structure(self, x: NDArray) -> SymfcAtoms:
         """Convert x to structure."""
         x_positions, x_cells = self._split(x)
         if self._relax_cell:
             axis = self._basis_axis @ x_cells
             cell = axis.reshape((3, 3)).T
-        else:
+        elif self._relax_volume:
             x_cells0 = self._split(self._x0)[1][0]
             scale = (x_cells[0] / x_cells0) ** (1 / 3)
             cell = self._structure.cell * scale
+        else:
+            cell = self._structure.cell
 
-        structure = SymfcAtoms(
+        return SymfcAtoms(
             cell=cell,
             numbers=self._structure.numbers,
-            scaled_positions=self._structure.scaled_positions,
+            scaled_positions=self._to_relaxed_positions(x_positions),
         )
 
-        if self._relax_positions:
-            return self._to_structure_fix_cell(x_positions)
-
-        return structure
+    def _to_relaxed_positions(self, x: NDArray) -> NDArray:
+        """Convert x to structure."""
+        if self._basis_frac is not None:
+            disps_f = (self._basis_frac @ x).reshape(-1, 3)
+            return _refine_positions(self._positions_f0 + disps_f)
+        return self._positions_f0
 
     def _to_volume(self, x: NDArray) -> float:
         _, x_cells = self._split(x)
@@ -597,11 +549,7 @@ class GeometryOptimization:
         else:
             self._res = minimize(fun, self._x0, method=method, jac=jac, options=options)
 
-        if self._relax_cell or self._relax_volume:
-            self._structure = self._to_structure_relax_cell(self._res.x)
-        else:
-            self._structure = self._to_structure_fix_cell(self._res.x)
-
+        self._structure = self._to_structure(self._res.x)
         self._x0 = self._res.x
 
         return self
