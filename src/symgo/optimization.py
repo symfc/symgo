@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from typing import Any, Literal
 
 import numpy as np
@@ -12,31 +11,17 @@ from scipy.optimize import NonlinearConstraint, minimize
 from symfc.basis_sets import FCBasisSetO1
 from symfc.utils.utils import SymfcAtoms
 
-
-def print_structure(structure: SymfcAtoms):
-    """Print structure."""
-    print("basis vectors:")
-    for a in structure.cell:
-        print(f" - {a}")
-    print("Fractional coordinates:")
-    for p, e in zip(structure.scaled_positions, structure.numbers):
-        print(f" - {e} {p}")
-
-
-def _refine_positions(positions: NDArray, tol=1e-13):
-    """Refine atomic positions to be within [0, 1)."""
-    positions -= np.floor(positions)
-    positions[np.where(positions > 1 - tol)] -= 1.0
-    return positions
-
-
-def _update_positions(structure: SymfcAtoms) -> SymfcAtoms:
-    """Update atomic positions."""
-    return SymfcAtoms(
-        cell=structure.cell,
-        numbers=structure.numbers,
-        scaled_positions=_refine_positions(structure.scaled_positions),
-    )
+from symgo.interface.base import PropertyCalculator
+from symgo.minimize import (
+    MinimizeFunctionParams,
+    function_fix_cell,
+    function_relax_cell,
+    jacobian_fix_cell,
+    jacobian_relax_cell,
+    refine_positions,
+    to_structure,
+    to_volume,
+)
 
 
 def _construct_basis_fractional_coordinates(cell: SymfcAtoms) -> NDArray | None:
@@ -128,50 +113,6 @@ def _normalize_vector(vec: ArrayLike) -> NDArray:
     return _vec / np.linalg.norm(_vec)
 
 
-class PropertyCalculator(ABC):
-    """Calculator class to compute properties."""
-
-    def __init__(self):
-        """Init method."""
-        self._energy: float
-        self._force: NDArray
-        self._stress: NDArray
-
-    @abstractmethod
-    def eval(self, cell: SymfcAtoms):
-        """Evaluate property."""
-        pass
-
-    @property
-    def energy(self) -> float:
-        """Return energy in a specific energy unit."""
-        return self._energy
-
-    @property
-    def force(self) -> NDArray:
-        """Return forces in a specific energy unit.
-
-        shape=(3, len(cell))
-
-        """
-        return self._force
-
-    @property
-    def stress(self) -> NDArray:
-        """Return stress in a specific energy unit.
-
-        shape=(6,)
-
-        """
-        return self._stress
-
-    @property
-    def GPa_to_energy(self) -> float:
-        """Return conversion factor from GPa to energy unit."""
-        EVtoGPa = 160.21766208
-        return 1.0 / EVtoGPa
-
-
 class GeometryOptimization:
     """Class for geometry optimization."""
 
@@ -207,7 +148,7 @@ class GeometryOptimization:
         self._relax_cell = relax_cell
         self._relax_volume = relax_volume
         self._relax_positions = relax_positions
-        self._with_sym = with_symmetry
+        self._with_symmetry_constraints = with_symmetry
         self._pressure = pressure * prop.GPa_to_energy
         self._verbose = verbose
 
@@ -215,7 +156,6 @@ class GeometryOptimization:
         self._basis_axis: NDArray | None
         self._transformation_matrix: NDArray
         self._set_basis_axis(cell)
-        self._positions_f0 = self._structure.scaled_positions
 
         self._basis_frac: NDArray | None
         self._set_basis_positions()
@@ -228,14 +168,20 @@ class GeometryOptimization:
         self._size_pos: int
         self._set_initial_coefficients()
 
-        if not relax_volume:
-            self._v0 = np.linalg.det(self._structure.cell)
+        self._params = MinimizeFunctionParams(
+            prop=self._prop,
+            size_pos=self._size_pos,
+            orig_x=self._x0,
+            orig_structure=self._structure,
+            basis_axis=self._basis_axis,
+            position_relaxation=self._relax_positions,
+            lattice_relaxation=self._relax_cell,
+            volume_relaxation=self._relax_volume,
+            basis_frac=self._basis_frac,
+            pressure=self._pressure,
+        )
 
-        self._energy: float
-        self._force: NDArray
-        self._stress: NDArray
         self._res: Any
-        self._n_atom = len(self._structure)
 
     @property
     def relax_cell(self) -> bool:
@@ -292,7 +238,7 @@ class GeometryOptimization:
         """Set basis vectors for axis components."""
         self._transformation_matrix = np.eye(3)
         if self._relax_cell:
-            if self._with_sym:
+            if self._with_symmetry_constraints:
                 self._basis_axis, self._transformation_matrix = _construct_basis_cell(
                     cell,
                     verbose=self._verbose,
@@ -305,13 +251,13 @@ class GeometryOptimization:
         self._structure = SymfcAtoms(
             cell=self._transformation_matrix.T @ cell.cell,
             numbers=cell.numbers,
-            scaled_positions=_refine_positions(cell.scaled_positions),
+            scaled_positions=refine_positions(cell.scaled_positions),
         )
 
     def _set_basis_positions(self):
         """Set basis vectors for atomic positions."""
         if self._relax_positions:
-            if self._with_sym:
+            if self._with_symmetry_constraints:
                 self._basis_frac = _construct_basis_fractional_coordinates(
                     self._structure
                 )
@@ -336,151 +282,6 @@ class GeometryOptimization:
 
         self._x0 = np.concatenate([xf, xs], 0)
         self._size_pos = 0 if self._basis_frac is None else self._basis_frac.shape[1]
-
-    def _split(self, x: NDArray):
-        """Split coefficients."""
-        partition1 = self._size_pos
-        x_pos = x[:partition1]
-        x_axis = x[partition1:]
-        return x_pos, x_axis
-
-    def function_fix_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
-        """Target function when performing no cell optimization.
-
-        args is a dummy variable for scipy.optimize.minimize.
-
-        """
-        structure = self._to_structure(x)
-        self._prop.eval(structure)
-        energy = self._prop.energy
-
-        if energy < -1e3 * self._n_atom:
-            print("Energy =", energy)
-            print("Axis :")
-            print(structure.cell)
-            print("Fractional coordinates:")
-            print(structure.scaled_positions)
-            raise ValueError(
-                "Geometry optimization failed: Huge negative energy value."
-            )
-
-        energy += self._pressure * np.linalg.det(structure.cell)
-        return energy
-
-    def jacobian_fix_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
-        """Target Jacobian function when performing no cell optimization.
-
-        x and args are a dummy variable for scipy.optimize.minimize.
-
-        """
-        if self._basis_frac is not None:
-            structure = self._to_structure(x)
-            prod = -(structure.cell @ self._prop.force).T
-            derivatives = self._basis_frac.T @ prod.ravel()
-            return derivatives
-        return []
-
-    def function_relax_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
-        """Target function when performing cell optimization.
-
-        args is a dummy variable for scipy.optimize.minimize.
-
-        """
-        structure = self._to_structure(x)
-        self._prop.eval(structure)
-        energy = self._prop.energy
-
-        if (
-            energy < -1e3 * self._n_atom
-            or abs(np.linalg.det(structure.cell)) / self._n_atom > 1000
-        ):
-            print("Energy =", energy)
-            print("Lattice vectors:")
-            print(structure.cell)
-            print("Fractional coordinates:")
-            print(structure.scaled_positions)
-            raise ValueError(
-                "Geometry optimization failed: Huge negative energy value"
-                "or huge volume value."
-            )
-
-        energy += self._pressure * np.linalg.det(structure.cell)
-        return energy
-
-    def jacobian_relax_cell(self, x: NDArray, args: tuple = ()) -> ArrayLike:
-        """Target Jacobian function when performing cell optimization.
-
-        args is a dummy variable for scipy.optimize.minimize.
-
-        """
-        partition1 = self._size_pos
-        derivatives = np.zeros(len(x))
-        if self._relax_positions:
-            derivatives[:partition1] = self.jacobian_fix_cell(x)
-        structure = self._to_structure(x)
-        derivatives[partition1:] = self._derivatives_by_axis(
-            structure, self._prop.stress
-        )
-        return derivatives
-
-    def _to_structure(self, x: NDArray) -> SymfcAtoms:
-        """Convert x to structure."""
-        x_positions, x_cells = self._split(x)
-        if self._relax_cell:
-            axis = self._basis_axis @ x_cells
-            cell = axis.reshape((3, 3)).T
-        elif self._relax_volume:
-            x_cells0 = self._split(self._x0)[1][0]
-            scale = (x_cells[0] / x_cells0) ** (1 / 3)
-            cell = self._structure.cell * scale
-        else:
-            cell = self._structure.cell
-
-        return SymfcAtoms(
-            cell=cell,
-            numbers=self._structure.numbers,
-            scaled_positions=self._to_relaxed_positions(x_positions),
-        )
-
-    def _to_relaxed_positions(self, x: NDArray) -> NDArray:
-        """Convert x to structure."""
-        if self._basis_frac is not None:
-            disps_f = (self._basis_frac @ x).reshape(-1, 3)
-            return _refine_positions(self._positions_f0 + disps_f)
-        return self._positions_f0
-
-    def _to_volume(self, x: NDArray) -> float:
-        _, x_cells = self._split(x)
-        axis = self._basis_axis @ x_cells
-        return np.linalg.det(axis.reshape((3, 3)))
-
-    def _derivatives_by_axis(
-        self, structure: SymfcAtoms, stress: NDArray
-    ) -> NDArray | float:
-        """Compute derivatives with respect to axis elements.
-
-        PV @ axis_inv.T is exactly the same as the derivatives of PV term
-        with respect to axis components.
-
-        Under the constraint of a fixed cell shape, the mean normal stress
-        serves as an approximation to the derivative of the enthalpy
-        with respect to volume.
-        """
-        pv = self._pressure * np.linalg.det(structure.cell)
-        sigma = [
-            [stress[0] - pv, stress[3], stress[5]],
-            [stress[3], stress[1] - pv, stress[4]],
-            [stress[5], stress[4], stress[2] - pv],
-        ]
-        if self._relax_cell:
-            """derivatives_s: In the order of ax, bx, cx, ay, by, cy, az, bz, cz"""
-            derivatives_s = -np.array(sigma) @ np.linalg.inv(structure.cell)
-            assert self._basis_axis is not None
-            derivatives_s = self._basis_axis.T @ derivatives_s.ravel()
-        else:
-            derivatives_s = -np.trace(np.array(sigma)) / 3
-
-        return derivatives_s
 
     def run(
         self,
@@ -522,34 +323,46 @@ class GeometryOptimization:
                 options["c2"] = c2
 
         if self._relax_cell or self._relax_volume:
-            fun = self.function_relax_cell
-            jac = self.jacobian_relax_cell
+            fun = function_relax_cell
+            jac = jacobian_relax_cell
         else:
-            fun = self.function_fix_cell
-            jac = self.jacobian_fix_cell
+            fun = function_fix_cell
+            jac = jacobian_fix_cell
 
         if self._verbose:
             print("Number of degrees of freedom:", len(self._x0), flush=True)
 
         if self._relax_cell and not self._relax_volume:
+            v0 = np.linalg.det(self._structure.cell)
             nlc = NonlinearConstraint(
-                self._to_volume,
-                self._v0 - 1e-15,
-                self._v0 + 1e-15,
+                to_volume(self._params.size_pos, self._params.basis_axis),
+                v0 - 1e-15,
+                v0 + 1e-15,
                 jac="2-point",
             )
             self._res = minimize(
                 fun,
                 self._x0,
+                (self._params,),
                 method=method,
                 jac=jac,
                 options=options,
                 constraints=[nlc],
             )
         else:
-            self._res = minimize(fun, self._x0, method=method, jac=jac, options=options)
+            self._res = minimize(
+                fun, self._x0, (self._params,), method=method, jac=jac, options=options
+            )
 
-        self._structure = self._to_structure(self._res.x)
-        self._x0 = self._res.x
+        self._structure = to_structure(
+            self._res.x,
+            self._size_pos,
+            self._x0,
+            self._structure,
+            self._basis_axis,
+            self._relax_cell,
+            self._relax_volume,
+            self._basis_frac,
+        )
 
         return self

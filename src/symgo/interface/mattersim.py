@@ -1,7 +1,9 @@
+"""MatterSim interface."""
+
 from numpy.typing import NDArray
 from symfc.utils.utils import SymfcAtoms
 
-from symgo.optimization import PropertyCalculator, print_structure
+from symgo.interface.base import PropertyCalculator, print_structure
 
 
 class MattersimPropertyCalculator(PropertyCalculator):

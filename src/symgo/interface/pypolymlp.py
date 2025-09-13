@@ -1,10 +1,12 @@
+"""Pypolymlp interface."""
+
 import os
 
 from numpy.typing import NDArray
 from phonopy.structure.atoms import PhonopyAtoms
 from symfc.utils.utils import SymfcAtoms
 
-from symgo.optimization import PropertyCalculator, print_structure
+from symgo.interface.base import PropertyCalculator, print_structure
 
 
 class PypolymlpPropertyCalculator(PropertyCalculator):
