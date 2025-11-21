@@ -3,7 +3,6 @@
 import os
 
 from numpy.typing import NDArray
-from phonopy.structure.atoms import PhonopyAtoms
 from symfc.utils.utils import SymfcAtoms
 
 from symgo.interface.base import PropertyCalculator, print_structure
@@ -18,12 +17,11 @@ class PypolymlpPropertyCalculator(PropertyCalculator):
         verbose: bool = False,
     ):
         """Init method."""
+        from phonopy.interface.pypolymlp import load_pypolymlp
         from pypolymlp.calculator.properties import Properties
-        from pypolymlp.mlp_dev.pypolymlp import Pypolymlp
 
         self._verbose = verbose
-        mlp = Pypolymlp()
-        mlp.load_mlp(str(polymlp_filename))
+        mlp = load_pypolymlp(polymlp_filename)
         self._prop = Properties(params=mlp.parameters, coeffs=mlp.coeffs)  # type: ignore
 
         self._energy: float
@@ -32,6 +30,7 @@ class PypolymlpPropertyCalculator(PropertyCalculator):
 
     def eval(self, cell: SymfcAtoms):
         """Evaluate property."""
+        from phonopy.structure.atoms import PhonopyAtoms
         from pypolymlp.utils.phonopy_utils import phonopy_cell_to_structure
 
         phpy_cell = PhonopyAtoms(
