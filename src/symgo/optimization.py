@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import warnings
+from typing import Literal
 
 import numpy as np
 import spglib
 from numpy.typing import ArrayLike, NDArray
-from scipy.optimize import NonlinearConstraint, minimize
+from scipy.optimize import NonlinearConstraint, OptimizeResult, minimize
 from symfc.basis_sets import FCBasisSetO1
 from symfc.utils.utils import SymfcAtoms
 
@@ -140,9 +141,6 @@ class GeometryOptimization:
 
         Any one of pot, (params, coeffs), and properties is needed.
         """
-        if not relax_cell and not relax_volume and not relax_positions:
-            raise ValueError("No degree of freedom to be optimized.")
-
         self._prop = prop
 
         self._relax_cell = relax_cell
@@ -151,37 +149,39 @@ class GeometryOptimization:
         self._with_symmetry_constraints = with_symmetry
         self._pressure = pressure * prop.GPa_to_energy
         self._verbose = verbose
-
         self._structure: SymfcAtoms
         self._basis_axis: NDArray | None
         self._transformation_matrix: NDArray
         self._set_basis_axis(cell)
-
         self._basis_frac: NDArray | None
         self._set_basis_positions()
+        self._res: OptimizeResult | None = None
 
-        if not self._relax_cell and not self._relax_volume:
-            if not self._relax_positions:
-                raise ValueError("No degree of freedom to be optimized.")
-
-        self._x0: NDArray
-        self._size_pos: int
-        self._set_initial_coefficients()
-
-        self._params = MinimizeFunctionParams(
-            prop=self._prop,
-            size_pos=self._size_pos,
-            orig_x=self._x0,
-            orig_structure=self._structure,
-            basis_axis=self._basis_axis,
-            position_relaxation=self._relax_positions,
-            lattice_relaxation=self._relax_cell,
-            volume_relaxation=self._relax_volume,
-            basis_frac=self._basis_frac,
-            pressure=self._pressure,
-        )
-
-        self._res: Any
+        if (
+            not self._relax_cell
+            and not self._relax_volume
+            and not self._relax_positions
+        ):
+            warnings.warn(
+                "No degree of freedom to be optimized.", UserWarning, stacklevel=2
+            )
+            self._params = None
+        else:
+            self._x0: NDArray
+            self._size_pos: int
+            self._set_initial_coefficients()
+            self._params = MinimizeFunctionParams(
+                prop=self._prop,
+                size_pos=self._size_pos,
+                orig_x=self._x0,
+                orig_structure=self._structure,
+                basis_axis=self._basis_axis,
+                position_relaxation=self._relax_positions,
+                lattice_relaxation=self._relax_cell,
+                volume_relaxation=self._relax_volume,
+                basis_frac=self._basis_frac,
+                pressure=self._pressure,
+            )
 
     @property
     def relax_cell(self) -> bool:
@@ -211,23 +211,30 @@ class GeometryOptimization:
     @property
     def energy(self):
         """Return energy at final iteration."""
+        if self._res is None:
+            raise ValueError("Optimization has not been run yet.")
         return self._res.fun  # type: ignore
 
     @property
     def n_iter(self):
         """Return number of iterations."""
+        if self._res is None:
+            raise ValueError("Optimization has not been run yet.")
         return self._res.nit  # type: ignore
 
     @property
     def success(self):
         """Return whether optimization is successful or not."""
         if self._res is None:
-            return False
+            raise ValueError("Optimization has not been run yet.")
         return self._res.success
 
     @property
     def residual_forces(self):
         """Return residual forces and stress represented in basis sets."""
+        if self._res is None:
+            raise ValueError("Optimization has not been run yet.")
+
         if self._relax_cell or self._relax_volume:
             residual_f = -self._res.jac[: self._size_pos]  # type: ignore
             residual_s = -self._res.jac[self._size_pos :]  # type: ignore
@@ -290,7 +297,7 @@ class GeometryOptimization:
         maxiter: int = 1000,
         c1: float | None = None,
         c2: float | None = None,
-    ):
+    ) -> GeometryOptimization:
         """Run geometry optimization.
 
         Parameters
@@ -302,6 +309,9 @@ class GeometryOptimization:
         c1: c1 parameter in scipy optimization. c1=1e-4 is the default in scipy.
         c2: c2 parameter in scipy optimization. c2=0.0 is the default in scipy.
         """
+        if self._params is None:
+            return self
+
         if self._relax_cell and not self._relax_volume:
             method = "SLSQP"
 
