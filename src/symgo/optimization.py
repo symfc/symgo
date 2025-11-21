@@ -199,7 +199,7 @@ class GeometryOptimization:
         return self._relax_positions
 
     @property
-    def structure(self):
+    def structure(self) -> SymfcAtoms:
         """Return optimized structure."""
         lattice = np.linalg.inv(self._transformation_matrix).T @ self._structure.cell
         return SymfcAtoms(
@@ -209,28 +209,33 @@ class GeometryOptimization:
         )
 
     @property
-    def energy(self):
+    def relaxed(self) -> bool:
+        """Return whether optimization has been run or not."""
+        return self._res is not None
+
+    @property
+    def energy(self) -> NDArray:
         """Return energy at final iteration."""
         if self._res is None:
             raise ValueError("Optimization has not been run yet.")
         return self._res.fun  # type: ignore
 
     @property
-    def n_iter(self):
+    def n_iter(self) -> int:
         """Return number of iterations."""
         if self._res is None:
             raise ValueError("Optimization has not been run yet.")
         return self._res.nit  # type: ignore
 
     @property
-    def success(self):
+    def success(self) -> bool:
         """Return whether optimization is successful or not."""
         if self._res is None:
             raise ValueError("Optimization has not been run yet.")
         return self._res.success
 
     @property
-    def residual_forces(self):
+    def residual_forces(self) -> NDArray | tuple[NDArray, NDArray]:
         """Return residual forces and stress represented in basis sets."""
         if self._res is None:
             raise ValueError("Optimization has not been run yet.")
