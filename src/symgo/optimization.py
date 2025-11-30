@@ -297,8 +297,10 @@ class GeometryOptimization:
 
     def run(
         self,
-        method: Literal["BFGS", "CG", "L-BFGS-B", "SLSQP"] = "BFGS",
+        method: Literal["BFGS", "CG", "TNC", "L-BFGS-B", "SLSQP"] = "BFGS",
         gtol: float = 1e-4,
+        xtol: float | None = None,
+        ftol: float | None = None,
         maxiter: int = 1000,
         c1: float | None = None,
         c2: float | None = None,
@@ -336,6 +338,10 @@ class GeometryOptimization:
                 options["c1"] = c1
             if c2 is not None:
                 options["c2"] = c2
+            if xtol is not None:
+                options["xtol"] = xtol
+            if ftol is not None:
+                options["ftol"] = ftol
 
         if self._relax_cell or self._relax_volume:
             fun = function_relax_cell
