@@ -376,7 +376,7 @@ class GeometryOptimization:
             )
 
         self._structure = to_structure(
-            self._res.x,
+            self._res.x,  # type: ignore
             self._size_pos,
             self._x0,
             self._structure,

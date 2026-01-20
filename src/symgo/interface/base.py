@@ -12,7 +12,7 @@ def print_structure(structure: SymfcAtoms):
     for a in structure.cell:
         print(f" - {a}")
     print("Fractional coordinates:")
-    for p, e in zip(structure.scaled_positions, structure.numbers):
+    for p, e in zip(structure.scaled_positions, structure.numbers, strict=True):
         print(f" - {e} {p}")
 
 
