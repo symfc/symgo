@@ -30,9 +30,8 @@ from symfc.utils.utils import SymfcAtoms
 from symgo.interface.pypolymlp import PypolymlpPropertyCalculator
 from symgo.optimization import GeometryOptimization
 
-def relax(
-    cell: SymfcAtoms, mlp: PypolymlpPropertyCalculator
-) -> SymfcAtoms:
+
+def relax(cell: SymfcAtoms, mlp: PypolymlpPropertyCalculator) -> SymfcAtoms:
     try:
         go = GeometryOptimization(cell, mlp, verbose=True)
         go.run()
